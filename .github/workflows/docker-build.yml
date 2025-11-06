@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - 'v1.0.0'   # 例如 v1.0.0 时触发
+      - 'v*' # 监听以 v 开头的标签，例如 v1.0.0
   workflow_dispatch: # 手动触发
 
 jobs:
@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
-      packages: write
+      contents: write   # 用于创建 Release 与上传资产
+      packages: write   # 用于推送到 ghcr.io
 
     steps:
       - name: Checkout code
@@ -30,22 +30,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/dukenan/frontend-rdb:latest
+          tags: ${{ steps.meta.outputs.tags }}
           platforms: linux/amd64
-          load: true
+          load: true # 构建后保留镜像在本地供 docker save 使用
 
-      - name: Export image tar
-        run: |
-          docker save ghcr.io/dukenan/frontend-rdb:latest -o image.tar
-
-      - name: Upload image as release asset
-        uses: softprops/action-gh-release@v2
+      - name: Export and Compress image tar
+        id: save_tar
         if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.tags }}"
+          echo "Saving image: ${IMAGE_TAG}"
+
+          # 导出为 tar
+          docker save ${IMAGE_TAG} -o image.tar
+
+          # 压缩
+          gzip -9 image.tar
+
+          # 重命名为固定文件名
+          mv image.tar.gz frontend-rdb.tar.gz
+
+          echo "asset_file=frontend-rdb.tar.gz" >> $GITHUB_OUTPUT
+
+      - name: Create or Update Release
+        id: create_release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          files: image.tar
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            🚀 自动构建的 Docker 镜像发布版本：
+            - **Tag:** ${{ github.ref_name }}
+            - **镜像地址:** ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            - **下载镜像压缩包:** frontend-rdb.tar.gz
+          files: ${{ steps.save_tar.outputs.asset_file }}
